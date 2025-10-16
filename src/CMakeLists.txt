@@ -1,0 +1,1 @@
+add_subdirectory(modules/tele1_sensor)
