@@ -1,40 +1,37 @@
 /*
  * tele1_sensor.cpp
+ * 1. tele1_sensor_main 启动并调用 task_spawn。
+ * 2. task_spawn 创建并初始化 Tele1Sensor 实例，调用 init 来启动串口或仿真。
+ * 3. init 配置串口或定时任务，并开始定时调用 Run。
+ * 4. Run 通过读取串口或生成仿真数据来调用 handle_bytes 解析数据。
+ * 5. 数据通过 uORB 发布
  *
- * A PX4 module that reads a simple frame‑based protocol from a serial
- * port (TELEM1) and publishes the values on a custom uORB topic.  The
- * incoming data frames start with 'R' followed by 16 ASCII digits
- * representing four sensor readings.  The module runs on a scheduled
- * work queue and publishes data periodically.
+ * A PX4 module that reads a simple frame-based protocol from a serial
+ * port and publishes the values on a custom uORB topic. Now supports:
+ *  - configurable device and baudrate via CLI (not just TELEM1)
+ *  - simulation mode that generates real-like frames and feeds
+ *    the same parser for SITL/self-test.
  */
 
 #include <px4_platform_common/module.h>
 #include <px4_platform_common/module_params.h>
 #include <px4_platform_common/px4_work_queue/ScheduledWorkItem.hpp>
 #include <px4_platform_common/atomic.h>
+#include <px4_platform_common/time.h>
 
 #include <uORB/Publication.hpp>
-#include <uORB/topics/tele1_sensor.h>   // 生成的自定义话题头（tele1_sensor_s）
+#include <uORB/topics/tele1_sensor.h>
 
 #include <fcntl.h>
 #include <termios.h>
 #include <unistd.h>
 #include <string.h>
 #include <errno.h>
-#include <px4_platform_common/time.h>
-
+#include <stdio.h>
+#include <stdlib.h>
 
 using namespace time_literals;
 
-/**
- * Tele1Sensor
- *
- * Derives from ModuleBase, ModuleParams and ScheduledWorkItem.  It
- * opens a serial device and reads frames of the form
- *   Rdddddddddddddddd
- * where the 16 digits are split into four sensor values.  Each
- * successfully parsed frame is published on the tele1_sensor uORB topic.
- */
 class Tele1Sensor : public ModuleBase<Tele1Sensor>,
                     public ModuleParams,
                     public px4::ScheduledWorkItem
@@ -43,50 +40,80 @@ public:
     Tele1Sensor();
     virtual ~Tele1Sensor() override;
 
-    /**
-     * Initialise the module.  Opens the serial port and schedules
-     * periodic execution.
-     */
     int init();
 
-    /**
-     * Implementation of ModuleBase: spawn the work‑queue task.
-     */
     static int task_spawn(int argc, char *argv[]);
-
-    /**
-     * Instantiate the module object.  Called from task_spawn().
-     */
     static Tele1Sensor *instantiate(int argc, char *argv[]);
-
-    /**
-     * Print usage information.
-     */
     static int print_usage(const char *reason = nullptr);
-    
     static int custom_command(int argc, char *argv[]);
 
-
 private:
-    /**
-     * Scheduled work.  Reads from the serial port, parses frames and
-     * publishes the data.
-     */
     void Run() override;
-
-    /**
-     * Configure the serial port (baud rate, format).  Returns 0 on
-     * success or a negative error code.
-     */
     int configure_port(int fd, speed_t baud);
 
-    // file descriptor for serial port
+    // map integer baud to termios speed_t
+    static speed_t map_baud(int baudrate) {
+        switch (baudrate) {
+        case 9600: return B9600;
+        case 19200: return B19200;
+        case 38400: return B38400;
+        case 57600: return B57600;
+        case 115200: return B115200;
+#ifdef B230400
+        case 230400: return B230400;
+#endif
+#ifdef B460800
+        case 460800: return B460800;
+#endif
+#ifdef B921600
+        case 921600: return B921600;
+#endif
+        default: return B115200; // fallback
+        }
+    }
+
+    // common byte handler so real+sim 复用同一套解析与发布逻辑
+    void handle_bytes(const char *data, size_t len) {
+        for (size_t i = 0; i < len; i++) {
+            char c = data[i];
+            if (_frame_len == 0) {
+                if (c == 'R') { _frame_buf[_frame_len++] = c; }
+            } else {
+                if (_frame_len < sizeof(_frame_buf)) {
+                    _frame_buf[_frame_len++] = c;
+                }
+                if (_frame_len == 17) {
+                    tele1_sensor_s msg{};
+                    msg.timestamp = hrt_absolute_time();
+                    for (int j = 0; j < 4; j++) {
+                        char digits[5] = {0};
+                        memcpy(digits, &_frame_buf[1 + j * 4], 4);
+                        unsigned long val = strtoul(digits, nullptr, 10);
+                        switch (j) {
+                        case 0: msg.sensor1 = (uint16_t)val; break;
+                        case 1: msg.sensor2 = (uint16_t)val; break;
+                        case 2: msg.sensor3 = (uint16_t)val; break;
+                        case 3: msg.sensor4 = (uint16_t)val; break;
+                        }
+                    }
+                    _pub.publish(msg);
+                    _frame_len = 0; // next frame
+                }
+            }
+        }
+    }
+
+private:
+    // runtime options
+    const char *_device{"/dev/ttyS1"};
+    int _baudrate{115200};
+    bool _simulate{false};
+    uint32_t _sim_interval_us{20000}; // default 50 Hz
+    // serial fd
     int _fd{-1};
-
-    // uORB publication handle
+    // uORB pub
     uORB::Publication<tele1_sensor_s> _pub{ORB_ID(tele1_sensor)};
-
-    // Buffer to accumulate partial frames
+    // frame buffer
     char _frame_buf[32]{};
     size_t _frame_len{0};
 };
@@ -99,13 +126,8 @@ Tele1Sensor::Tele1Sensor()
 
 Tele1Sensor::~Tele1Sensor()
 {
-    // Stop work queue scheduling
     ScheduleClear();
-
-    if (_fd >= 0) {
-        ::close(_fd);
-        _fd = -1;
-    }
+    if (_fd >= 0) { ::close(_fd); _fd = -1; }
 }
 
 int Tele1Sensor::configure_port(int fd, speed_t baud)
@@ -116,18 +138,17 @@ int Tele1Sensor::configure_port(int fd, speed_t baud)
         return -errno;
     }
 
-    // Input and output baud rate
     cfsetispeed(&config, baud);
     cfsetospeed(&config, baud);
 
-    // 8N1: 8 data bits, no parity, 1 stop bit
+    // 8N1
     config.c_cflag &= ~(PARENB | CSTOPB | CSIZE);
     config.c_cflag |= (CS8 | CLOCAL | CREAD);
 
-    // disable flow control
+    // no flow control
     config.c_iflag &= ~(IXON | IXOFF | IXANY);
 
-    // raw input
+    // raw
     config.c_lflag &= ~(ICANON | ECHO | ECHOE | ISIG);
     config.c_oflag &= ~OPOST;
 
@@ -135,97 +156,107 @@ int Tele1Sensor::configure_port(int fd, speed_t baud)
         PX4_ERR("tcsetattr failed: %d", errno);
         return -errno;
     }
-
     return 0;
 }
 
 int Tele1Sensor::init()
 {
-    // open TELEM1 port (CUAV V5+ maps TELEM1 to /dev/ttyS1 on PX4)
-    const char *device = "/dev/ttyS1";
-    _fd = ::open(device, O_RDWR | O_NOCTTY | O_NONBLOCK);
+    if (_simulate) {
+        // 仿真：不打开串口，定时生成“R+16位数字”喂给解析器
+        ScheduleOnInterval(_sim_interval_us);
+        PX4_INFO("tele1_sensor SIM mode @ %.1f Hz", 1e6 / static_cast<double>(_sim_interval_us));
+        return PX4_OK;
+    }
+
+    // 打开指定设备
+    _fd = ::open(_device, O_RDWR | O_NOCTTY | O_NONBLOCK);
     if (_fd < 0) {
-        PX4_ERR("Failed to open %s: %d", device, errno);
+        PX4_ERR("open %s failed: %d", _device, errno);
         return -errno;
     }
 
-    // configure for 115200 baud, 8N1
-    if (configure_port(_fd, B115200) != 0) {
+    if (configure_port(_fd, map_baud(_baudrate)) != 0) {
         return PX4_ERROR;
     }
 
-    // schedule periodic execution every 5 ms
+    // 5ms 轮询串口
     ScheduleOnInterval(5_ms);
-
-    PX4_INFO("tele1_sensor started, reading from %s", device);
-
+    PX4_INFO("tele1_sensor started, dev=%s baud=%d", _device, _baudrate);
     return PX4_OK;
 }
 
 void Tele1Sensor::Run()
 {
-    // if serial port invalid, nothing to do
-    if (_fd < 0) {
+    if (_simulate) {
+        // 生成一个平滑变化的4通道数据（0..9999 循环），并以真实帧格式喂给解析器
+        static uint32_t t = 0;
+        uint16_t s1 = (1000 + (t % 9000)) % 10000;
+        uint16_t s2 = (2000 + ((t * 3) % 9000)) % 10000;
+        uint16_t s3 = (3000 + ((t * 7) % 9000)) % 10000;
+        uint16_t s4 = (4000 + ((t * 11) % 9000)) % 10000;
+        char frame[18] = {0}; // 'R' + 16 digits + '\0'
+        // 保证每个值4位，前导0补齐
+        // 注意：snprintf 末尾会写 '\0'，但我们只喂 17 个字节给解析器
+        snprintf(frame, sizeof(frame), "R%04u%04u%04u%04u", s1, s2, s3, s4);
+        handle_bytes(frame, 17);
+        t++;
         return;
     }
 
-    // Read available bytes.  We use a small buffer and non‑blocking
+    if (_fd < 0) { return; }
+
     char buf[32];
     ssize_t nread = ::read(_fd, buf, sizeof(buf));
     if (nread > 0) {
-        // iterate through received bytes and assemble frames
-        for (ssize_t i = 0; i < nread; i++) {
-            char c = buf[i];
-            if (_frame_len == 0) {
-                // waiting for frame start
-                if (c == 'R') {
-                    _frame_buf[_frame_len++] = c;
-                }
-            } else {
-                // already have 'R', collect next bytes
-                if (_frame_len < sizeof(_frame_buf)) {
-                    _frame_buf[_frame_len++] = c;
-                }
+        handle_bytes(buf, (size_t)nread);
+    }
+}
 
-                // complete frame when we have 'R' + 16 digits
-                if (_frame_len == 17) {
-                    // parse digits
-                    tele1_sensor_s msg{};
-                    msg.timestamp = hrt_absolute_time();
-                    for (int j = 0; j < 4; j++) {
-                        char digits[5] = {0};
-                        memcpy(digits, &_frame_buf[1 + j * 4], 4);
-                        unsigned long val = strtoul(digits, nullptr, 10);
-                        if (j == 0) msg.sensor1 = (uint16_t)val;
-                        else if (j == 1) msg.sensor2 = (uint16_t)val;
-                        else if (j == 2) msg.sensor3 = (uint16_t)val;
-                        else if (j == 3) msg.sensor4 = (uint16_t)val;
-                    }
+int Tele1Sensor::task_spawn(int argc, char *argv[])
+{
+    // 缺省值
+    const char *device = "/dev/ttyS1";
+    int baud = 115200;
+    bool sim = false;
+    unsigned sim_hz = 50;
 
-                    // publish message
-                    _pub.publish(msg);
-
-                    // reset frame buffer for next frame
-                    _frame_len = 0;
+    // 解析命令行参数（在 'start' 之后）
+    // 支持：
+    //   -d|--device <path>
+    //   -b|--baud <int>
+    //   --sim [hz]
+    for (int i = 1; i < argc; i++) {
+        if ((strcmp(argv[i], "-d") == 0 || strcmp(argv[i], "--device") == 0) && (i + 1) < argc) {
+            device = argv[++i];
+        } else if ((strcmp(argv[i], "-b") == 0 || strcmp(argv[i], "--baud") == 0) && (i + 1) < argc) {
+            baud = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--sim") == 0) {
+            sim = true;
+            if ((i + 1) < argc) {
+                char *endp = nullptr;
+                long v = strtol(argv[i + 1], &endp, 10);
+                if (endp && *endp == '\0' && v > 0) {
+                    sim_hz = (unsigned)v;
+                    i++;
                 }
             }
         }
     }
 
-    // Reschedule the next run; this is automatically handled by ScheduledWorkItem
-    // because ScheduleOnInterval() sets up repeating intervals.
-}
-
-int Tele1Sensor::task_spawn(int argc, char *argv[])
-{
     Tele1Sensor *instance = new Tele1Sensor();
     if (!instance) {
         PX4_ERR("alloc failed");
         return PX4_ERROR;
     }
 
+    // 将解析到的配置写入实例
+    instance->_device = device;
+    instance->_baudrate = baud;
+    instance->_simulate = sim;
+    instance->_sim_interval_us = (sim_hz > 0) ? (1000000u / sim_hz) : 20000u;
+
     _object.store(instance);
-    _task_id = -1; // work‑queue tasks do not spawn threads
+    _task_id = -1; // work-queue task (no pthread)
 
     int ret = instance->init();
     if (ret != PX4_OK) {
@@ -236,9 +267,9 @@ int Tele1Sensor::task_spawn(int argc, char *argv[])
     return PX4_OK;
 }
 
-Tele1Sensor *Tele1Sensor::instantiate(int argc, char *argv[])
+Tele1Sensor *Tele1Sensor::instantiate(int, char *[])
 {
-    return nullptr; // not used with ScheduledWorkItem pattern
+    return nullptr; // not used
 }
 
 int Tele1Sensor::print_usage(const char *reason)
@@ -246,49 +277,56 @@ int Tele1Sensor::print_usage(const char *reason)
     if (reason) {
         PX4_ERR("%s", reason);
     }
+
     PRINT_MODULE_DESCRIPTION(
         R"desc(
 ### Description
 
-Reads frames from a serial device (TELEM1) and publishes the
-four parsed sensor values on the `tele1_sensor` uORB topic.
+Reads frames from a serial device and publishes four parsed sensor values
+on the `tele1_sensor` uORB topic.
 
-### Implementation
+### Protocol
 
-Runs on the high‑priority work queue (hp_default), reading
-non‑blocking from `/dev/ttyS1`.  Each frame has the format
-`Rdddddddddddddddd` where `d` are digits.  After parsing
-the four 4‑digit values, the module publishes them with a
-timestamp.  The topic can be logged via the PX4 system logger.
+Each frame: `Rdddddddddddddddd` ('R' + 16 ASCII digits = 4 x 4-digit values).
+
+### Features
+
+- Configurable device/baud via CLI
+- Simulation mode (no serial) that generates real-like frames and feeds the same parser
 
 ### Usage
 
-```sh
-tele1_sensor start    # start the module
-tele1_sensor status   # check if running
-tele1_sensor stop     # stop the module
-```
+tele1_sensor start [-d <device>] [-b <baud>] [--sim [Hz]]
+  -d, --device : serial device path (default: /dev/ttyS1)
+  -b, --baud   : baudrate (default: 115200)
+  --sim [Hz]   : run in simulation mode at given rate (default 50 Hz)
 
-Add the topic to the logger (for example using `logger add tele1_sensor 0`) to
-record the values in the ULog file.
+tele1_sensor status
+tele1_sensor stop
 
+Example:
+  tele1_sensor start                           # TELEM1 @115200
+  tele1_sensor start -d /dev/ttyS2 -b 921600   # use TELEM2 @921600
+  tele1_sensor start --sim                     # sim at 50 Hz
+  tele1_sensor start --sim 200                 # sim at 200 Hz
 )desc"
     );
 
     PRINT_MODULE_USAGE_NAME("tele1_sensor", "examples");
     PRINT_MODULE_USAGE_COMMAND("start");
+    PRINT_MODULE_USAGE_PARAM_STRING('d', "/dev/ttyS1", nullptr, "Serial device", true);
+    PRINT_MODULE_USAGE_PARAM_INT('b', 115200, 0, 10000000, "Baud rate", true);
+    PRINT_MODULE_USAGE_PARAM_FLAG('S', "Simulation mode (alias: --sim)", true);
     PRINT_MODULE_USAGE_DEFAULT_COMMANDS();
 
     return 0;
 }
 
-int Tele1Sensor::custom_command(int argc, char *argv[])
+int Tele1Sensor::custom_command(int, char *[])
 {
     return print_usage("unrecognized command");
 }
-/**
- * PX4 shell entry point
- */
+
 extern "C" __EXPORT int tele1_sensor_main(int argc, char *argv[])
 {
     return Tele1Sensor::main(argc, argv);
@@ -296,6 +334,5 @@ extern "C" __EXPORT int tele1_sensor_main(int argc, char *argv[])
 
 extern "C" __EXPORT int tele1_sensor_app_main(int argc, char *argv[])
 {
-    // 一些板卡/配置会寻找 *_app_main，这里转发到 *_main 即可
     return tele1_sensor_main(argc, argv);
 }

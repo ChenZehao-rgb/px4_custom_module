@@ -95,6 +95,19 @@ After a flight, download the ULog file and inspect it using Flight
 Review or `pyulog`.  The custom `tele1_sensor` topic will contain the
 timestamp and four sensor values.
 
-command: 
-HEADLESS=1 make px4_sitl gz_x500 EXTERNAL_MODULES_LOCATION=/home/sia/tele1_sensor_module
-make px4_sitl gz_x500 EXTERNAL_MODULES_LOCATION=/home/sia/tele1_sensor_module
+## build command: 
+HEADLESS=1 make px4_sitl gz_x500 EXTERNAL_MODULES_LOCATION=/home/sia/px4_custom_module
+make px4_fmu-v5_default EXTERNAL_MODULES_LOCATION=/home/sia/px4_custom_module
+
+## 测试（SITL）:
+### 进入 PX4 控制台后，启动仿真数据源：
+tele1_sensor start --sim 100   # 100 Hz 例子
+listener tele1_sensor          # 看看是否在发布
+### 伪串口自测:
+1. sudo apt-get install socat
+2. socat -d -d pty,raw,echo=0 pty,raw,echo=0
+记下两端的路径，比如 /dev/pts/5 和 /dev/pts/6
+3. 模块指向一端：
+tele1_sensor start -d /dev/pts/5 -b 115200
+4. 另一端写入帧进行测试：
+echo -n "R0001000200030004" > /dev/pts/6
