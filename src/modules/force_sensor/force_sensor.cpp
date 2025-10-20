@@ -1,7 +1,7 @@
 /*
- * tele1_sensor.cpp
- * 1. tele1_sensor_main 启动并调用 task_spawn。
- * 2. task_spawn 创建并初始化 Tele1Sensor 实例，调用 init 来启动串口或仿真。
+ * force_sensor.cpp
+ * 1. force_sensor_main 启动并调用 task_spawn。
+ * 2. task_spawn 创建并初始化 ForceSensor 实例，调用 init 来启动串口或仿真。
  * 3. init 配置串口或定时任务，并开始定时调用 Run。
  * 4. Run 通过读取串口或生成仿真数据来调用 handle_bytes 解析数据。
  * 5. 数据通过 uORB 发布
@@ -20,7 +20,7 @@
 #include <px4_platform_common/time.h>
 
 #include <uORB/Publication.hpp>
-#include <uORB/topics/tele1_sensor.h>
+#include <uORB/topics/force_sensor.h>
 
 #include <fcntl.h>
 #include <termios.h>
@@ -32,18 +32,18 @@
 
 using namespace time_literals;
 
-class Tele1Sensor : public ModuleBase<Tele1Sensor>,
+class ForceSensor : public ModuleBase<ForceSensor>,
                     public ModuleParams,
                     public px4::ScheduledWorkItem
 {
 public:
-    Tele1Sensor();
-    virtual ~Tele1Sensor() override;
+    ForceSensor();
+    virtual ~ForceSensor() override;
 
     int init();
 
     static int task_spawn(int argc, char *argv[]);
-    static Tele1Sensor *instantiate(int argc, char *argv[]);
+    static ForceSensor *instantiate(int argc, char *argv[]);
     static int print_usage(const char *reason = nullptr);
     static int custom_command(int argc, char *argv[]);
 
@@ -83,7 +83,7 @@ private:
                     _frame_buf[_frame_len++] = c;
                 }
                 if (_frame_len == 17) {
-                    tele1_sensor_s msg{};
+                    force_sensor_s msg{};
                     msg.timestamp = hrt_absolute_time();
                     for (int j = 0; j < 4; j++) {
                         char digits[5] = {0};
@@ -112,25 +112,25 @@ private:
     // serial fd
     int _fd{-1};
     // uORB pub
-    uORB::Publication<tele1_sensor_s> _pub{ORB_ID(tele1_sensor)};
+    uORB::Publication<force_sensor_s> _pub{ORB_ID(force_sensor)};
     // frame buffer
     char _frame_buf[32]{};
     size_t _frame_len{0};
 };
 
-Tele1Sensor::Tele1Sensor()
+ForceSensor::ForceSensor()
     : ModuleParams(nullptr),
       ScheduledWorkItem(MODULE_NAME, px4::wq_configurations::hp_default)
 {
 }
 
-Tele1Sensor::~Tele1Sensor()
+ForceSensor::~ForceSensor()
 {
     ScheduleClear();
     if (_fd >= 0) { ::close(_fd); _fd = -1; }
 }
 
-int Tele1Sensor::configure_port(int fd, speed_t baud)
+int ForceSensor::configure_port(int fd, speed_t baud)
 {
     struct termios config{};
     if (tcgetattr(fd, &config) < 0) {
@@ -159,12 +159,12 @@ int Tele1Sensor::configure_port(int fd, speed_t baud)
     return 0;
 }
 
-int Tele1Sensor::init()
+int ForceSensor::init()
 {
     if (_simulate) {
         // 仿真：不打开串口，定时生成“R+16位数字”喂给解析器
         ScheduleOnInterval(_sim_interval_us);
-        PX4_INFO("tele1_sensor SIM mode @ %.1f Hz", 1e6 / static_cast<double>(_sim_interval_us));
+        PX4_INFO("force_sensor SIM mode @ %.1f Hz", 1e6 / static_cast<double>(_sim_interval_us));
         return PX4_OK;
     }
 
@@ -181,11 +181,11 @@ int Tele1Sensor::init()
 
     // 5ms 轮询串口
     ScheduleOnInterval(5_ms);
-    PX4_INFO("tele1_sensor started, dev=%s baud=%d", _device, _baudrate);
+    PX4_INFO("force_sensor started, dev=%s baud=%d", _device, _baudrate);
     return PX4_OK;
 }
 
-void Tele1Sensor::Run()
+void ForceSensor::Run()
 {
     if (_simulate) {
         // 生成一个平滑变化的4通道数据（0..9999 循环），并以真实帧格式喂给解析器
@@ -212,7 +212,7 @@ void Tele1Sensor::Run()
     }
 }
 
-int Tele1Sensor::task_spawn(int argc, char *argv[])
+int ForceSensor::task_spawn(int argc, char *argv[])
 {
     // 缺省值
     const char *device = "/dev/ttyS1";
@@ -243,7 +243,7 @@ int Tele1Sensor::task_spawn(int argc, char *argv[])
         }
     }
 
-    Tele1Sensor *instance = new Tele1Sensor();
+    ForceSensor *instance = new ForceSensor();
     if (!instance) {
         PX4_ERR("alloc failed");
         return PX4_ERROR;
@@ -267,12 +267,12 @@ int Tele1Sensor::task_spawn(int argc, char *argv[])
     return PX4_OK;
 }
 
-Tele1Sensor *Tele1Sensor::instantiate(int, char *[])
+ForceSensor *ForceSensor::instantiate(int, char *[])
 {
     return nullptr; // not used
 }
 
-int Tele1Sensor::print_usage(const char *reason)
+int ForceSensor::print_usage(const char *reason)
 {
     if (reason) {
         PX4_ERR("%s", reason);
@@ -283,7 +283,7 @@ int Tele1Sensor::print_usage(const char *reason)
 ### Description
 
 Reads frames from a serial device and publishes four parsed sensor values
-on the `tele1_sensor` uORB topic.
+on the `force_sensor` uORB topic.
 
 ### Protocol
 
@@ -296,23 +296,23 @@ Each frame: `Rdddddddddddddddd` ('R' + 16 ASCII digits = 4 x 4-digit values).
 
 ### Usage
 
-tele1_sensor start [-d <device>] [-b <baud>] [--sim [Hz]]
+force_sensor start [-d <device>] [-b <baud>] [--sim [Hz]]
   -d, --device : serial device path (default: /dev/ttyS1)
   -b, --baud   : baudrate (default: 115200)
   --sim [Hz]   : run in simulation mode at given rate (default 50 Hz)
 
-tele1_sensor status
-tele1_sensor stop
+force_sensor status
+force_sensor stop
 
 Example:
-  tele1_sensor start                           # TELEM1 @115200
-  tele1_sensor start -d /dev/ttyS2 -b 921600   # use TELEM2 @921600
-  tele1_sensor start --sim                     # sim at 50 Hz
-  tele1_sensor start --sim 200                 # sim at 200 Hz
+  force_sensor start                           # TELEM1 @115200
+  force_sensor start -d /dev/ttyS2 -b 921600   # use TELEM2 @921600
+  force_sensor start --sim                     # sim at 50 Hz
+  force_sensor start --sim 200                 # sim at 200 Hz
 )desc"
     );
 
-    PRINT_MODULE_USAGE_NAME("tele1_sensor", "examples");
+    PRINT_MODULE_USAGE_NAME("force_sensor", "examples");
     PRINT_MODULE_USAGE_COMMAND("start");
     PRINT_MODULE_USAGE_PARAM_STRING('d', "/dev/ttyS1", nullptr, "Serial device", true);
     PRINT_MODULE_USAGE_PARAM_INT('b', 115200, 0, 10000000, "Baud rate", true);
@@ -322,17 +322,17 @@ Example:
     return 0;
 }
 
-int Tele1Sensor::custom_command(int, char *[])
+int ForceSensor::custom_command(int, char *[])
 {
     return print_usage("unrecognized command");
 }
 
-extern "C" __EXPORT int tele1_sensor_main(int argc, char *argv[])
+extern "C" __EXPORT int force_sensor_main(int argc, char *argv[])
 {
-    return Tele1Sensor::main(argc, argv);
+    return ForceSensor::main(argc, argv);
 }
 
-extern "C" __EXPORT int tele1_sensor_app_main(int argc, char *argv[])
+extern "C" __EXPORT int force_sensor_app_main(int argc, char *argv[])
 {
-    return tele1_sensor_main(argc, argv);
+    return force_sensor_main(argc, argv);
 }

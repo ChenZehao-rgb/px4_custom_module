@@ -1,1 +1,1 @@
-add_subdirectory(modules/tele1_sensor)
+add_subdirectory(modules/force_sensor)
