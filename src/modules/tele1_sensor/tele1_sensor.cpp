@@ -154,8 +154,8 @@ int Tele1Sensor::init()
         return PX4_ERROR;
     }
 
-    // schedule periodic execution every 100 ms
-    ScheduleOnInterval(100_ms);
+    // schedule periodic execution every 5 ms
+    ScheduleOnInterval(5_ms);
 
     PX4_INFO("tele1_sensor started, reading from %s", device);
 
