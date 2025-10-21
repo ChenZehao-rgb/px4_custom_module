@@ -279,27 +279,13 @@ int ForceSensor::reader_trampoline(int, char**)
 
 int ForceSensor::reader_loop()
 {
-    struct pollfd pfd{};
-    pfd.fd = _fd;
-    pfd.events = POLLIN;
-
     char buf[64];
 
     while (!_exit_requested && !should_exit()) {
-        int pret = ::poll(&pfd, 1, 100 /*ms*/);
-
-        if (pret > 0 && (pfd.revents & POLLIN)) {
-            ssize_t n = ::read(_fd, buf, sizeof(buf));
-            if (n > 0) {
-                handle_bytes(buf, (size_t)n);
-            }
-        } else if (pret == 0) {
-            // 超时：检查退出标志后继续
-        } else if (pret < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            PX4_ERR("poll err: %d", errno);
+        ssize_t n = ::read(_fd, buf, sizeof(buf));
+        if (n > 0) {
+            handle_bytes(buf, n);
+        } else {
             px4_usleep(10000);
         }
     }
