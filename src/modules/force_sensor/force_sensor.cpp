@@ -174,11 +174,6 @@ ForceSensor::~ForceSensor()
     // 请求退出：SIM 清调度；实机关闭 fd 唤醒阻塞读
     _exit_requested = true;
     ScheduleClear();
-
-    if (_fd >= 0) {
-        ::close(_fd);
-        _fd = -1;
-    }
 }
 
 int ForceSensor::configure_port(int fd, speed_t baud)
@@ -195,18 +190,21 @@ int ForceSensor::configure_port(int fd, speed_t baud)
     // 原始模式 8N1，无软硬流控
     cfg.c_cflag &= ~(PARENB | CSTOPB | CSIZE);
     cfg.c_cflag |= (CS8 | CLOCAL | CREAD);
-    cfg.c_iflag &= ~(IXON | IXOFF | IXANY);
+    cfg.c_cflag &= ~CRTSCTS;
+
+    cfg.c_iflag &= ~(IXON | IXOFF | IXANY | ICRNL | INLCR | IGNCR | BRKINT | PARMRK | INPCK | ISTRIP);
     cfg.c_lflag &= ~(ICANON | ECHO | ECHOE | ISIG);
-    cfg.c_oflag &= ~OPOST;
+    cfg.c_oflag &= ~(OPOST | ONLCR | OCRNL);
 
     // 读策略：配合 poll()，让 read() 立即取缓冲区内已有字节，不再额外阻塞
     cfg.c_cc[VMIN]  = 0;
-    cfg.c_cc[VTIME] = 0;
+    cfg.c_cc[VTIME] = 5;
 
     if (tcsetattr(fd, TCSANOW, &cfg) < 0) {
         PX4_ERR("tcsetattr: %d", errno);
         return -errno;
     }
+    tcflush(fd, TCIOFLUSH); // 清空历史残留
     return PX4_OK;
 }
 
@@ -219,17 +217,6 @@ int ForceSensor::init()
         ScheduleOnInterval(_sim_interval_us);
         PX4_INFO("force_sensor SIM @ %.1f Hz", 1e6 / double(_sim_interval_us));
         return PX4_OK;
-    }
-
-    // 实机：打开串口（阻塞模式；不加 O_NONBLOCK）
-    _fd = ::open(_device, O_RDWR | O_NOCTTY);
-    if (_fd < 0) {
-        PX4_ERR("open %s failed: %d", _device, errno);
-        return -errno;
-    }
-
-    if (configure_port(_fd, map_baud(_baudrate)) != PX4_OK) {
-        return PX4_ERROR;
     }
 
     // 启动读线程（阻塞读），不要在工作队列里阻塞
@@ -247,6 +234,7 @@ int ForceSensor::init()
         return PX4_ERROR;
     }
 
+    _task_id = _reader_task; // 标记为已启动
     PX4_INFO("force_sensor (blocking) dev=%s baud=%d", _device, _baudrate);
     return PX4_OK;
 }
@@ -279,17 +267,34 @@ int ForceSensor::reader_trampoline(int, char**)
 
 int ForceSensor::reader_loop()
 {
+    // 在子任务里打开串口（很关键）
+    int fd = ::open(_device, O_RDWR | O_NOCTTY);
+    if (fd < 0) {
+        PX4_ERR("open %s failed: %d", _device, errno);
+        return -errno;
+            }
+    if (configure_port(fd, map_baud(_baudrate)) != PX4_OK) {
+        ::close(fd);
+        return PX4_ERROR;
+    }
+    // 记录给调试/状态用；注意：不同 task 的 fd 表不共享，父任务关不掉这个 fd
+    _fd = fd;
+
     char buf[64];
 
     while (!_exit_requested && !should_exit()) {
-        ssize_t n = ::read(_fd, buf, sizeof(buf));
+        ssize_t n = ::read(fd, buf, sizeof(buf)); // 最多阻塞 0.5s（由 VTIME 决定）
         if (n > 0) {
             handle_bytes(buf, n);
-        } else {
+        } else if (n == 0) {
+            // 超时，检查退出标志后继续
+        } else if (errno != EINTR) {
+            PX4_ERR("read err: %d", errno);
             px4_usleep(10000);
         }
     }
-
+    ::close(fd);
+    _fd = -1;
     return 0;
 }
 
