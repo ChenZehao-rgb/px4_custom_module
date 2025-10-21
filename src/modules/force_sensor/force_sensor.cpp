@@ -25,6 +25,8 @@
 #include <uORB/Publication.hpp>
 #include <uORB/topics/force_sensor.h>
 
+#include <uORB/topics/debug_array.h> // For debug
+
 #include <fcntl.h>
 #include <termios.h>
 #include <unistd.h>
@@ -96,7 +98,6 @@ private:
             }
 
             if (_frame_len == 17) {
-                force_sensor_s msg{};
                 msg.timestamp = hrt_absolute_time();
 
                 for (int j = 0; j < 4; j++) {
@@ -112,6 +113,15 @@ private:
                 }
 
                 _pub.publish(msg);
+                if (_use_debug)
+                {
+                    _debug_msg.timestamp = msg.timestamp;
+                    _debug_msg.data[0] = msg.sensor1;
+                    _debug_msg.data[1] = msg.sensor2;
+                    _debug_msg.data[2] = msg.sensor3;
+                    _debug_msg.data[3] = msg.sensor4;
+                    _debug_pub.publish(_debug_msg);
+                }
                 _frame_len = 0; // 下一帧
             }
         }
@@ -127,6 +137,7 @@ private:
     const char *_device{"/dev/ttyS1"};
     int _baudrate{115200};
     bool _simulate{false};
+    bool _use_debug{true};
     uint32_t _sim_interval_us{20000}; // 默认 50 Hz
 
     // 串口 fd
@@ -134,7 +145,10 @@ private:
 
     // uORB 发布器
     uORB::Publication<force_sensor_s> _pub{ORB_ID(force_sensor)};
+    uORB::Publication<debug_array_s> _debug_pub{ORB_ID(debug_array)};
 
+    force_sensor_s msg{};
+    debug_array_s _debug_msg{};
     // 帧缓冲
     char _frame_buf[32]{}; // 够 17 字节
     size_t _frame_len{0};
@@ -198,6 +212,8 @@ int ForceSensor::configure_port(int fd, speed_t baud)
 
 int ForceSensor::init()
 {
+    _debug_msg.id = 1;
+    strncpy(_debug_msg.name, "force_sensor", 10);
     if (_simulate) {
         // 仿真模式：按频率定时喂帧
         ScheduleOnInterval(_sim_interval_us);
