@@ -134,11 +134,9 @@ private:
 
 private:
     // 运行时选项
-    const char *_device{"/dev/ttyS1"};
+    const char *_device{"/dev/ttyS2"};
     int _baudrate{115200};
-    bool _simulate{false};
-    bool _use_debug{true};
-    uint32_t _sim_interval_us{20000}; // 默认 50 Hz
+    bool _use_debug{false};
 
     // 串口 fd
     int _fd{-1};
@@ -176,6 +174,15 @@ ForceSensor::~ForceSensor()
     ScheduleClear();
 }
 
+void ForceSensor::Run()
+{
+    // 当前模块仅在实机模式下使用阻塞读线程；留出 SIM 扩展点
+    if (_exit_requested || should_exit()) {
+        ScheduleClear();
+        return;
+    }
+}
+
 int ForceSensor::configure_port(int fd, speed_t baud)
 {
     struct termios cfg{};
@@ -196,7 +203,6 @@ int ForceSensor::configure_port(int fd, speed_t baud)
     cfg.c_lflag &= ~(ICANON | ECHO | ECHOE | ISIG);
     cfg.c_oflag &= ~(OPOST | ONLCR | OCRNL);
 
-    // 读策略：配合 poll()，让 read() 立即取缓冲区内已有字节，不再额外阻塞
     cfg.c_cc[VMIN]  = 0;
     cfg.c_cc[VTIME] = 5;
 
@@ -211,13 +217,7 @@ int ForceSensor::configure_port(int fd, speed_t baud)
 int ForceSensor::init()
 {
     _debug_msg.id = 1;
-    strncpy(_debug_msg.name, "force_sensor", 10);
-    if (_simulate) {
-        // 仿真模式：按频率定时喂帧
-        ScheduleOnInterval(_sim_interval_us);
-        PX4_INFO("force_sensor SIM @ %.1f Hz", 1e6 / double(_sim_interval_us));
-        return PX4_OK;
-    }
+    strncpy(_debug_msg.name, "force_sensor", sizeof(_debug_msg.name));
 
     // 启动读线程（阻塞读），不要在工作队列里阻塞
     g_instance = this;
@@ -237,27 +237,6 @@ int ForceSensor::init()
     _task_id = _reader_task; // 标记为已启动
     PX4_INFO("force_sensor (blocking) dev=%s baud=%d", _device, _baudrate);
     return PX4_OK;
-}
-
-void ForceSensor::Run()
-{
-    // 仅仿真模式会调度到这里
-    if (!_simulate) {
-        return;
-    }
-
-    static uint32_t t = 0;
-    uint16_t s1 = (1000 + (t % 9000)) % 10000;
-    uint16_t s2 = (2000 + ((t * 3) % 9000)) % 10000;
-    uint16_t s3 = (3000 + ((t * 7) % 9000)) % 10000;
-    uint16_t s4 = (4000 + ((t * 11) % 9000)) % 10000;
-
-    char frame[18] = {0};
-    // snprintf 会写入终止符 '\0'，我们只喂 17 个有效字节
-    snprintf(frame, sizeof(frame), "R%04u%04u%04u%04u", s1, s2, s3, s4);
-    handle_bytes(frame, 17);
-
-    t++;
 }
 
 int ForceSensor::reader_trampoline(int, char**)
@@ -303,10 +282,9 @@ int ForceSensor::reader_loop()
 int ForceSensor::task_spawn(int argc, char *argv[])
 {
     // 默认参数
-    const char *device = "/dev/ttyS1";
+    const char *device = "/dev/ttyS2";
     int baud = 115200;
-    bool sim = false;
-    unsigned sim_hz = 50;
+    bool use_debug = false;
 
     // 解析命令行（位于 "start" 之后）
     for (int i = 1; i < argc; i++) {
@@ -314,16 +292,8 @@ int ForceSensor::task_spawn(int argc, char *argv[])
             device = argv[++i];
         } else if ((strcmp(argv[i], "-b") == 0 || strcmp(argv[i], "--baud") == 0) && (i + 1) < argc) {
             baud = atoi(argv[++i]);
-        } else if (strcmp(argv[i], "--sim") == 0) {
-            sim = true;
-            if ((i + 1) < argc) {
-                char *endp = nullptr;
-                long v = strtol(argv[i + 1], &endp, 10);
-                if (endp && *endp == '\0' && v > 0) {
-                    sim_hz = (unsigned)v;
-                    i++;
-                }
-            }
+        } else if ((strcmp(argv[i], "-u") == 0 || strcmp(argv[i], "--use_debug") == 0) && (i + 1) < argc) {
+            use_debug = (strcmp(argv[++i], "true") == 0);
         }
     }
 
@@ -335,8 +305,7 @@ int ForceSensor::task_spawn(int argc, char *argv[])
 
     instance->_device = device;
     instance->_baudrate = baud;
-    instance->_simulate = sim;
-    instance->_sim_interval_us = (sim_hz > 0) ? (1000000u / sim_hz) : 20000u;
+    instance->_use_debug = use_debug;
 
     _object.store(instance);
     _task_id = -1; // 非 pthread，工作队列不用于实机模式
@@ -371,24 +340,24 @@ Reads frames from a serial device ('R' + 16 ASCII digits) and publishes four par
 Each frame: `Rdddddddddddddddd`  // 4 x 4-digit decimal numbers
 
 ### Modes
-- Real device: dedicated thread with blocking poll/read (low CPU)
-- Simulation: ScheduledWorkItem at given Hz feeding the same parser
+- Real device: dedicated thread with blocking read (low CPU)
 
 ### Usage
 force_sensor start [-d <device>] [-b <baud>] [--sim [Hz]]
   -d, --device : serial path (default /dev/ttyS1)
   -b, --baud   : baudrate (default 115200)
-  --sim [Hz]   : run in simulation mode at given rate (default 50 Hz)
+  -u, --use_debug : publish debug_array topic (default false)
 
 force_sensor status
 force_sensor stop
 )DESC");
 
+    // use example to print parameter info
     PRINT_MODULE_USAGE_NAME("force_sensor", "examples");
     PRINT_MODULE_USAGE_COMMAND("start");
     PRINT_MODULE_USAGE_PARAM_STRING('d', "/dev/ttyS1", nullptr, "Serial device", true);
     PRINT_MODULE_USAGE_PARAM_INT('b', 115200, 0, 2000000, "Baud rate", true);
-    PRINT_MODULE_USAGE_PARAM_FLAG('S', "Simulation mode (alias: --sim)", true);
+    PRINT_MODULE_USAGE_PARAM_FLAG('u', "Publish debug_array topic (alias: --use_debug)", true);
     PRINT_MODULE_USAGE_DEFAULT_COMMANDS();
 
     return 0;
