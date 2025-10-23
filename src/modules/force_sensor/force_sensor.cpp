@@ -127,115 +127,99 @@ private:
     //     }
     // }
 
-    static inline uint16_t modbus_crc16(const uint8_t *buf, size_t len)
-    {
-        uint16_t crc = 0xFFFF;
-        for (size_t i = 0; i < len; i++) {
-            crc ^= buf[i];
-            for (int b = 0; b < 8; b++) {
-                if (crc & 0x0001) {
-                    crc = (crc >> 1) ^ 0xA001;  // 多项式 0xA001
-                } else {
-                    crc >>= 1;
-                }
-            }
-        }
-        return crc;
+    // 取 BE/LE 32 位有符号
+    static inline int32_t be_i32(const uint8_t *p) {
+        return (int32_t)(((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+                        ((uint32_t)p[2] << 8)  |  (uint32_t)p[3]);
+    }
+    static inline int32_t le_i32(const uint8_t *p) {
+        return (int32_t)((uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+                        ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24));
     }
 
-    // 工具函数：左移缓冲区，丢弃前 n 个字节
-    inline void shift_buffer(uint8_t *buf, size_t &len, size_t n)
-    {
+    static inline void shift_buffer(uint8_t *buf, size_t &len, size_t n) {
         if (n >= len) { len = 0; return; }
         memmove(buf, buf + n, len - n);
         len -= n;
     }
+
     void handle_bytes(const char *data, size_t len)
     {
-        const uint8_t *bytes = reinterpret_cast<const uint8_t*>(data);
+        const uint8_t *in = reinterpret_cast<const uint8_t*>(data);
 
         for (size_t i = 0; i < len; i++) {
-            // 追加到接收缓冲
-            if (_frame_len < sizeof(_frame_buf)) {
-                _frame_buf[_frame_len++] = bytes[i];
-            } else {
-                // 溢出保护：清空重来（也可选择丢 1 字节）
-                _frame_len = 0;
-                continue;
-            }
+            if (_frame_len < sizeof(_frame_buf)) _frame_buf[_frame_len++] = in[i];
+            else { shift_buffer(_frame_buf, _frame_len, 1); _frame_buf[_frame_len++] = in[i]; }
 
-            // 尝试从缓冲中提取完整帧（可能一次读进来多帧）
-            while (_frame_len >= 3) {
-                // Modbus RTU 无固定起始符，至少先要有 3 字节 (addr, func, byte_count)
-                // uint8_t addr = _frame_buf[0];
-                uint8_t func = _frame_buf[1];
-                uint8_t byte_count = _frame_buf[2];
+            while (_frame_len >= 24) {
+                // 同步帧头 0x01 0x50
+                size_t start = 0;
+                while (start + 1 < _frame_len) {
+                    if (_frame_buf[start] == 0x01 && _frame_buf[start + 1] == 0x50) break;
+                    start++;
+                }
+                if (start) shift_buffer(_frame_buf, _frame_len, start);
+                if (_frame_len < 24) break;
 
-                // 合理性检查：byte_count 最少应为 2 的倍数（每寄存器2字节），且总长不应超缓冲
-                size_t frame_len = 3u + static_cast<size_t>(byte_count) + 2u; // +CRC(2)
-                if (byte_count % 2 != 0 || frame_len > sizeof(_frame_buf)) {
-                    // 不合理，丢弃一个字节后继续同步
+                // 检查帧尾 0xFF 0xFE
+                if (!(_frame_buf[22] == 0xFF && _frame_buf[23] == 0xFE)) {
                     shift_buffer(_frame_buf, _frame_len, 1);
                     continue;
                 }
 
-                // 数据未接收完整则退出内层循环，等待更多字节
-                if (_frame_len < frame_len) break;
+                // 数据区（头后到尾前）：第 2..21 字节（共 20B）
+                const uint8_t *payload = &_frame_buf[2]; // 长度 20B：可能含对齐字节 + 16B通道 + 4B未知
+                int32_t v[4] = {0};
+                bool parsed = false;
 
-                // 到这里有一帧候选：做 CRC 校验
-                uint16_t crc_calc = modbus_crc16(_frame_buf, frame_len - 2);
-                uint16_t crc_recv = static_cast<uint16_t>(_frame_buf[frame_len - 2])
-                                | (static_cast<uint16_t>(_frame_buf[frame_len - 1]) << 8);
+                // 1) 自适应：尝试 0..3 的起始偏移，按 BE32
+                for (int off = 0; off <= 3 && !parsed; off++) {
+                    // 要保证 off+16 <= 20（四个通道 16B 都在 payload 内）
+                    if (off + 16 > 20) break;
 
-                if (crc_calc != crc_recv) {
-                    // CRC 错误，丢弃 1 字节重同步
-                    shift_buffer(_frame_buf, _frame_len, 1);
-                    continue;
-                }
-
-                // CRC 正确：检查功能码（0x03 = 读保持寄存器；0x83 为异常）
-                if (func == 0x83) {
-                    // 异常响应：忽略整帧
-                    shift_buffer(_frame_buf, _frame_len, frame_len);
-                    continue;
-                }
-
-                if (func == 0x03) {
-                    // 解析前 4 个寄存器（有多少读多少，最多 4 个）
-                    int regs = byte_count / 2;    // 可用寄存器数
-                    int take = regs > 4 ? 4 : regs;
-
-                    uint16_t vals[4] = {0, 0, 0, 0};
-                    for (int r = 0; r < take; r++) {
-                        size_t base = 3 + static_cast<size_t>(r) * 2;
-                        uint16_t hi = _frame_buf[base];
-                        uint16_t lo = _frame_buf[base + 1];
-                        vals[r] = static_cast<uint16_t>((hi << 8) | lo); // Modbus 大端
+                    // 判定“最高字节是否像符号扩展”（全 0 或全 FF）
+                    bool ok = true;
+                    for (int k = 0; k < 4; k++) {
+                        uint8_t msb = payload[off + k*4 + 0]; // BE32 的最高字节
+                        if (!(msb == 0x00 || msb == 0xFF)) { ok = false; break; }
                     }
+                    if (!ok) continue;
 
-                    // 发布 uORB
-                    msg.timestamp = hrt_absolute_time();
-                    msg.sensor1 = vals[0];
-                    msg.sensor2 = vals[1];
-                    msg.sensor3 = vals[2];
-                    msg.sensor4 = vals[3];
-                    _pub.publish(msg);
-
-                    if (_use_debug) {
-                        _debug_msg.timestamp = msg.timestamp;
-                        _debug_msg.data[0] = msg.sensor1;
-                        _debug_msg.data[1] = msg.sensor2;
-                        _debug_msg.data[2] = msg.sensor3;
-                        _debug_msg.data[3] = msg.sensor4;
-                        _debug_pub.publish(_debug_msg);
-                    }
+                    for (int k = 0; k < 4; k++) v[k] = be_i32(payload + off + k*4);
+                    parsed = true;
                 }
 
-                // 消费掉这一帧，继续尝试解析下一帧
-                shift_buffer(_frame_buf, _frame_len, frame_len);
+                // 2) 兜底：按原先 LE32@偏移0
+                if (!parsed) {
+                    v[0] = le_i32(payload + 0);
+                    v[1] = le_i32(payload + 4);
+                    v[2] = le_i32(payload + 8);
+                    v[3] = le_i32(payload + 12);
+                }
+
+                // 发布
+                msg.timestamp = hrt_absolute_time();
+                msg.sensor1 = v[0];
+                msg.sensor2 = v[1];
+                msg.sensor3 = v[2];
+                msg.sensor4 = v[3];
+                _pub.publish(msg);
+
+                if (_use_debug) {
+                    _debug_msg.timestamp = msg.timestamp;
+                    _debug_msg.data[0] = msg.sensor1;
+                    _debug_msg.data[1] = msg.sensor2;
+                    _debug_msg.data[2] = msg.sensor3;
+                    _debug_msg.data[3] = msg.sensor4;
+                    _debug_pub.publish(_debug_msg);
+                }
+
+                // 消费整帧
+                shift_buffer(_frame_buf, _frame_len, 24);
             }
         }
     }
+
 
     /** 独立线程入口（trampoline） */
     static int reader_trampoline(int argc, char *argv[]);

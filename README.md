@@ -112,6 +112,7 @@ force_sensor start -d /dev/pts/5 -b 115200
 4. 另一端写入帧进行测试：
 send once:
 echo '01030800110022003301621CA7' | xxd -r -p > /dev/pts/8
+echo '0150FFFFFFFFF5000000C600000042FFFFFFF6CFFCCCFFFE' | xxd -r -p > /dev/pts/7
 send circle:
 while true; do echo '01030800110022003301621CA7' | xxd -r -p > /dev/pts/7; sleep 0.05; done 
 
