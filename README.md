@@ -106,8 +106,13 @@ listener force_sensor          # 看看是否在发布
 ### 伪串口自测:
 1. sudo apt-get install socat
 2. socat -d -d pty,raw,echo=0 pty,raw,echo=0
-记下两端的路径，比如 /dev/pts/5 和 /dev/pts/6
+记下两端的路径，比如 /dev/pts/5 和 /dev/pts/7
 3. 模块指向一端：
 force_sensor start -d /dev/pts/5 -b 115200
 4. 另一端写入帧进行测试：
-echo -n "R0001000200030004" > /dev/pts/6
+send once:
+echo '01030800110022003301621CA7' | xxd -r -p > /dev/pts/8
+send circle:
+while true; do echo '01030800110022003301621CA7' | xxd -r -p > /dev/pts/7; sleep 0.05; done 
+
+echo -n "R0001000200030004" > /dev/pts/8
