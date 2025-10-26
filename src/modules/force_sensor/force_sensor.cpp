@@ -312,7 +312,7 @@ int ForceSensor::configure_port(int fd, speed_t baud)
 int ForceSensor::init()
 {
     _debug_msg.id = 1;
-    strncpy(_debug_msg.name, "force_sensor", sizeof(_debug_msg.name));
+    strncpy(_debug_msg.name, "sensor_f", sizeof(_debug_msg.name));
 
     // 启动读线程（阻塞读），不要在工作队列里阻塞
     g_instance = this;
@@ -330,7 +330,7 @@ int ForceSensor::init()
     }
 
     _task_id = _reader_task; // 标记为已启动
-    PX4_INFO("force_sensor (blocking) dev=%s baud=%d", _device, _baudrate);
+    PX4_INFO("force_sensor (blocking) dev=%s baud=%d, use_debug=%d", _device, _baudrate, _use_debug);
     return PX4_OK;
 }
 
