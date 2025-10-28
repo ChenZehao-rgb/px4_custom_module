@@ -1,1 +1,2 @@
 add_subdirectory(modules/force_sensor)
+add_subdirectory(modules/pwm_raw_control)
