@@ -179,9 +179,9 @@ void PwmRawControl::run_manual()
 
 void PwmRawControl::run_sweep()
 {
-    PX4_INFO("Sweep mode: %u motor(s), lo=%.1f%% hi=%.1f%% step=%.1f%% hold=%ums gap=%ums repeats=%u",
+    PX4_INFO("Sweep mode: %u motor(s), lo=%.1f%% hi=%.1f%% step=%.1f%% hold=%lums gap=%lums repeats=%u",
              _num, (double)_sweep_lo_pct, (double)_sweep_hi_pct, (double)_sweep_step_pct,
-             _sweep_hold_ms, _sweep_gap_ms, _sweep_repeats);
+             (unsigned long)_sweep_hold_ms, (unsigned long)_sweep_gap_ms, _sweep_repeats);
 
     // 不用 std::vector，使用定长数组
     static float seq[256];
@@ -208,9 +208,9 @@ void PwmRawControl::run_dither()
     const float v_hi   = pct_to_norm_motor(hi_pct);
     const float v_lo   = pct_to_norm_motor(lo_pct);
 
-    PX4_INFO("Dither mode: %u motor(s), base=%.1f%% amp=%.1f%% → [lo=%.1f%%, hi=%.1f%%], hold=%ums, cycles=%u",
+    PX4_INFO("Dither mode: %u motor(s), base=%.1f%% amp=%.1f%% → [lo=%.1f%%, hi=%.1f%%], hold=%lums, cycles=%u",
              _num, (double)_dither_base_pct, (double)_dither_amp_pct,
-             (double)lo_pct, (double)hi_pct, _dither_hold_ms, _dither_cycles);
+             (double)lo_pct, (double)hi_pct, (unsigned long)_dither_hold_ms, _dither_cycles);
 
     for (unsigned i = 0; i < _dither_cycles && !should_exit(); ++i) {
         PX4_INFO("Dither %u/%u : HI", i + 1, _dither_cycles);
